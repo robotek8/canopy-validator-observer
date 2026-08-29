@@ -1,0 +1,9 @@
+services:
+  observer:
+    build: .
+    network_mode: "container:${CANOPY_NODE_CONTAINER:-node}"
+    user: "${OBSERVER_UID:-0}:${OBSERVER_GID:-0}"
+    env_file:
+      - .env
+    volumes:
+      - ./reports:/app/reports
