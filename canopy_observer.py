@@ -32,11 +32,81 @@ class Config:
     admin_password: str = ""
     timeout: float = 4.0
     min_peers: int = 1
+    stale_height_seconds: float = 600.0
     warning_percent: float = 80.0
     critical_percent: float = 90.0
 
 
 RequestFunction = Callable[[str, str, str, float, str, str], Any]
+
+
+def evaluate_height_progress(
+    report: dict[str, Any],
+    state: dict[str, Any] | None,
+    stale_after_seconds: float,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Compare the current height with the last observed height change."""
+
+    height = report.get("node", {}).get("height")
+    if isinstance(height, bool) or not isinstance(height, int):
+        return state
+
+    observed_at = now or datetime.now(timezone.utc)
+    status = "OK"
+    message = f"height baseline recorded at {height}"
+
+    previous_height = state.get("height") if isinstance(state, dict) else None
+    changed_at_raw = state.get("changed_at") if isinstance(state, dict) else None
+    changed_at = None
+    if isinstance(changed_at_raw, str):
+        try:
+            changed_at = datetime.fromisoformat(changed_at_raw)
+            if changed_at.tzinfo is None:
+                changed_at = changed_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            changed_at = None
+
+    if isinstance(previous_height, int) and not isinstance(previous_height, bool):
+        if height > previous_height:
+            message = f"height advanced from {previous_height} to {height}"
+        elif height < previous_height:
+            status = "WARNING"
+            message = f"height decreased from {previous_height} to {height}"
+        elif changed_at is not None:
+            unchanged_seconds = max(0.0, (observed_at - changed_at).total_seconds())
+            if unchanged_seconds >= stale_after_seconds:
+                status = "CRITICAL"
+                message = (
+                    f"height {height} has not advanced for "
+                    f"{int(unchanged_seconds)} seconds"
+                )
+            else:
+                message = (
+                    f"height {height} unchanged for {int(unchanged_seconds)} seconds; "
+                    f"limit is {int(stale_after_seconds)}"
+                )
+
+    if not isinstance(previous_height, int) or height != previous_height:
+        new_state = {
+            "height": height,
+            "changed_at": observed_at.isoformat(),
+        }
+    else:
+        new_state = {
+            "height": height,
+            "changed_at": (
+                changed_at.isoformat() if changed_at is not None else observed_at.isoformat()
+            ),
+        }
+
+    report["checks"].append(
+        {"name": "height_progress", "status": status, "message": message}
+    )
+    report["status"] = max(
+        report["checks"], key=lambda item: SEVERITY[item["status"]]
+    )["status"]
+    return new_state
 
 
 def _join_url(base_url: str, route: str) -> str:
@@ -283,6 +353,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=float(os.getenv("CANOPY_TIMEOUT", "4")))
     parser.add_argument("--min-peers", type=int, default=int(os.getenv("CANOPY_MIN_PEERS", "1")))
     parser.add_argument(
+        "--stale-height-seconds",
+        type=float,
+        default=float(os.getenv("CANOPY_STALE_HEIGHT_SECONDS", "600")),
+        help="mark the node critical when height does not advance for this long",
+    )
+    parser.add_argument(
         "--warning-percent",
         type=float,
         default=float(os.getenv("CANOPY_WARNING_PERCENT", "80")),
@@ -323,6 +399,20 @@ def _save_report(report: dict[str, Any], directory: Path) -> Path:
     return timestamped
 
 
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _save_height_state(state: dict[str, Any], directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
+    (directory / "height-state.json").write_text(content, encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(Path(".env"))
     args = _build_parser().parse_args(argv)
@@ -336,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         admin_password=os.getenv("CANOPY_ADMIN_PASSWORD", ""),
         timeout=args.timeout,
         min_peers=args.min_peers,
+        stale_height_seconds=args.stale_height_seconds,
         warning_percent=args.warning_percent,
         critical_percent=args.critical_percent,
     )
@@ -343,13 +434,25 @@ def main(argv: list[str] | None = None) -> int:
     if config.warning_percent >= config.critical_percent:
         print("warning threshold must be lower than critical threshold", file=sys.stderr)
         return 2
+    if config.stale_height_seconds <= 0:
+        print("stale height threshold must be positive", file=sys.stderr)
+        return 2
 
+    report_directory = Path(args.report_dir)
     report = collect_report(config)
+    height_state = _read_json_object(report_directory / "height-state.json")
+    next_height_state = evaluate_height_progress(
+        report,
+        height_state,
+        config.stale_height_seconds,
+    )
     report_path = None
     report_error = None
     if not args.no_report:
         try:
-            report_path = _save_report(report, Path(args.report_dir))
+            report_path = _save_report(report, report_directory)
+            if next_height_state is not None:
+                _save_height_state(next_height_state, report_directory)
         except OSError as exc:
             report_error = str(exc)
             report["checks"].append(

@@ -11,6 +11,7 @@ This is a personal community project, not official Canopy software.
 ## What It Checks
 
 - Node version and next block height
+- Block-height progress across consecutive checks
 - Connected, inbound, and outbound peer counts
 - Sync and consensus status
 - System CPU, memory, and disk usage
@@ -26,7 +27,21 @@ publish them directly on the host. The observer can safely share that container'
 
 ```bash
 cp .env.example .env
-docker compose -f compose.observer.yml run --rm observer
+docker compose -f compose.observer.yml up -d --build
+docker compose -f compose.observer.yml logs -f observer
+```
+
+The observer runs once per minute by default and restarts automatically. Stop it with:
+
+```bash
+docker compose -f compose.observer.yml down
+```
+
+For a single foreground check:
+
+```bash
+docker compose -f compose.observer.yml run --rm \
+  --entrypoint python observer /app/canopy_observer.py
 ```
 
 The Compose file runs the observer as `0:0` by default so it can write to the host-mounted
@@ -75,6 +90,10 @@ Report: reports/canopy-status-20260829T120000Z.json
 Reports are written to `reports/` and ignored by Git. They contain health values only, not RPC URLs,
 credentials, validator addresses, public keys, or peer lists.
 
+The observer also stores `height-state.json` in that directory. It records only the last height and
+the time when that height changed. If the height does not advance for ten minutes, the observer
+reports `CRITICAL` even when the RPC endpoint itself still responds.
+
 If a report cannot be written, the observer now prints the health result and a warning instead of
 terminating with a traceback.
 
@@ -101,14 +120,17 @@ identities are intentionally excluded from this record.
 | `CANOPY_ADMIN_ENABLED` | `true` | Enables admin health checks |
 | `CANOPY_TIMEOUT` | `4` | Request timeout in seconds |
 | `CANOPY_MIN_PEERS` | `1` | Minimum peer count before a warning |
+| `CANOPY_STALE_HEIGHT_SECONDS` | `600` | Maximum time without block-height progress |
 | `CANOPY_WARNING_PERCENT` | `80` | Resource warning threshold |
 | `CANOPY_CRITICAL_PERCENT` | `90` | Resource critical threshold |
+| `CANOPY_INTERVAL_SECONDS` | `60` | Delay between checks in the Compose service |
 
 `CANOPY_ADMIN_USER` and `CANOPY_ADMIN_PASSWORD` are optional and should remain only in `.env`.
 
 ## Tests
 
 The tests use fixed local responses and never contact a live validator.
+GitHub Actions runs them on Python 3.11 and 3.12 for every push and pull request.
 
 ```bash
 python3 -m unittest discover -s tests -v
