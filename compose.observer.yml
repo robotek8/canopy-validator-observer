@@ -3,6 +3,14 @@ services:
     build: .
     network_mode: "container:${CANOPY_NODE_CONTAINER:-node}"
     user: "${OBSERVER_UID:-0}:${OBSERVER_GID:-0}"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          python /app/canopy_observer.py || true
+          sleep "$${CANOPY_INTERVAL_SECONDS:-60}"
+        done
+    restart: unless-stopped
     env_file:
       - .env
     volumes:

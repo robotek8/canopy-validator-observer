@@ -1,9 +1,16 @@
 import json
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from canopy_observer import Config, RpcError, collect_report, request_json
+from canopy_observer import (
+    Config,
+    RpcError,
+    collect_report,
+    evaluate_height_progress,
+    request_json,
+)
 
 
 HEALTHY_RESPONSES = {
@@ -136,6 +143,43 @@ class ObserverTests(unittest.TestCase):
         report = collect_report(Config(), fake_request(responses))
 
         self.assertEqual(report["node"]["height"], 999)
+
+    def test_height_progress_records_baseline(self):
+        now = datetime(2026, 9, 2, tzinfo=timezone.utc)
+        report = collect_report(Config(), fake_request(HEALTHY_RESPONSES))
+
+        state = evaluate_height_progress(report, None, 600, now)
+
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(state["height"], 12345)
+
+    def test_height_progress_detects_stalled_node(self):
+        now = datetime(2026, 9, 2, tzinfo=timezone.utc)
+        report = collect_report(Config(), fake_request(HEALTHY_RESPONSES))
+        state = {
+            "height": 12345,
+            "changed_at": (now - timedelta(minutes=11)).isoformat(),
+        }
+
+        evaluate_height_progress(report, state, 600, now)
+
+        self.assertEqual(report["status"], "CRITICAL")
+        check = next(item for item in report["checks"] if item["name"] == "height_progress")
+        self.assertIn("has not advanced", check["message"])
+
+    def test_height_progress_resets_timer_after_advance(self):
+        now = datetime(2026, 9, 2, tzinfo=timezone.utc)
+        report = collect_report(Config(), fake_request(HEALTHY_RESPONSES))
+        state = {
+            "height": 12344,
+            "changed_at": (now - timedelta(hours=1)).isoformat(),
+        }
+
+        new_state = evaluate_height_progress(report, state, 600, now)
+
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(new_state["height"], 12345)
+        self.assertEqual(new_state["changed_at"], now.isoformat())
 
 
 if __name__ == "__main__":
